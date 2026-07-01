@@ -166,6 +166,10 @@ def add_prusa_controls(ui, MainWindow):
     ui.gridLayout.setVerticalSpacing(6)
     ui.verticalLayout_2.setSpacing(6)
 
+    # Prusa XL bed is 360 x 360 mm -- use that as the default print area.
+    ui.dimensionX.setText("360")
+    ui.dimensionY.setText("360")
+
     cw = ui.centralwidget
 
     def _label(text, x, y, w, h):
