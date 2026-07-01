@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell(py \"C:/Users/rkpir/AppData/Local/Temp/claude/c--Development-python-projects-PRUSA-XL-Retraction-Calibration/d19af1f5-def3-4378-9fea-213cb09218a9/scratchpad/shot.py\")",
-      "PowerShell(cd \"c:/Development/python-projects/PRUSA XL Retraction Calibration\"; Write-Output \"===logic test===\"; py \"C:/Users/rkpir/AppData/Local/Temp/claude/c--Development-python-projects-PRUSA-XL-Retraction-Calibration/d19af1f5-def3-4378-9fea-213cb09218a9/scratchpad/auto_test.py\" | Select-Object -Last 1; Write-Output \"===rebuild exe===\"; py -m PyInstaller --noconsole --onefile --name \"PrusaXL-RetractionGenerator\" RetCalMain.py 2>&1 | Select-Object -Last 4; Write-Output \"BUILD EXIT=$LASTEXITCODE\")"
-    ]
-  }
-}
