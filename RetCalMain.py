@@ -139,10 +139,32 @@ def add_prusa_controls(ui, MainWindow):
     to the existing UI at runtime, so the generated RetCalui.py stays untouched
     and safe to regenerate from RetCalui.ui with pyuic5."""
 
-    # Grow the fixed-size window to make room for the new bottom panel.
-    MainWindow.setMinimumSize(QtCore.QSize(810, 900))
-    MainWindow.setMaximumSize(QtCore.QSize(810, 900))
-    MainWindow.resize(810, 900)
+    # De-cramp the original fixed layout. Two problems: labels were clipped
+    # horizontally (columns too narrow), and the input rows were packed with no
+    # vertical breathing room. Fix both: widen the window/columns AND make the
+    # input columns much taller so the grid/vbox layouts spread their rows out,
+    # plus give every input box a comfortable minimum height.
+    W, H = 1130, 980
+    MainWindow.setMinimumSize(QtCore.QSize(W, H))
+    MainWindow.setMaximumSize(QtCore.QSize(W, H))
+    MainWindow.resize(W, H)
+
+    # left inputs column (retraction/temps/fan) -- tall so ~13 rows breathe
+    ui.gridLayoutWidget.setGeometry(QtCore.QRect(15, 10, 215, 700))
+    # middle column (nozzle/layer/filament/start-gcode box/etc.)
+    ui.verticalLayoutWidget_2.setGeometry(QtCore.QRect(245, 10, 205, 700))
+    # right info/preview panel (photo + notes)
+    ui.verticalLayoutWidget.setGeometry(QtCore.QRect(470, 0, 650, 800))
+    # generate button
+    ui.genGcode.setGeometry(QtCore.QRect(15, 730, 300, 58))
+
+    # Taller input boxes + a little spacing between rows.
+    for le in ui.gridLayoutWidget.findChildren(QtWidgets.QLineEdit):
+        le.setMinimumHeight(24)
+    for le in ui.verticalLayoutWidget_2.findChildren(QtWidgets.QLineEdit):
+        le.setMinimumHeight(24)
+    ui.gridLayout.setVerticalSpacing(6)
+    ui.verticalLayout_2.setSpacing(6)
 
     cw = ui.centralwidget
 
@@ -155,32 +177,34 @@ def add_prusa_controls(ui, MainWindow):
 
     # Relabel the existing custom-gcode box: it now fully replaces the default
     # start gcode instead of being appended to it.
-    ui.label_21.setText("Start Gcode (manual mode only)")
+    ui.label_21.setText("Start Gcode (manual)")
 
+    # New bottom panel spans under the left + middle columns (x 15..455),
+    # clear of the right info panel (x 470+).
     # Auto mode: generate Prusa XL start/end gcode from the inputs. Default ON,
     # so the user only has to pick a tool -- no pasting required.
     ui.autoStart = QtWidgets.QCheckBox("Auto-generate Prusa XL start/end gcode", cw)
-    ui.autoStart.setGeometry(QtCore.QRect(20, 648, 300, 20))
+    ui.autoStart.setGeometry(QtCore.QRect(15, 792, 400, 22))
     ui.autoStart.setChecked(True)
     ui.autoStart.show()
 
     # Active tool selector (T0..T4).
-    _label("Prusa XL Active Tool", 20, 672, 200, 18)
+    _label("Prusa XL Active Tool", 15, 818, 200, 18)
     ui.toolSelect = QtWidgets.QComboBox(cw)
-    ui.toolSelect.setGeometry(QtCore.QRect(20, 692, 120, 26))
+    ui.toolSelect.setGeometry(QtCore.QRect(15, 838, 130, 28))
     ui.toolSelect.addItems(["T0", "T1", "T2", "T3", "T4"])
     ui.toolSelect.show()
 
     # Start-gcode preset dropdown (manual mode; populated from ./presets).
-    _label("Start-gcode preset", 150, 672, 165, 18)
+    _label("Start-gcode preset (manual mode)", 160, 818, 300, 18)
     ui.presetSelect = QtWidgets.QComboBox(cw)
-    ui.presetSelect.setGeometry(QtCore.QRect(150, 692, 165, 26))
+    ui.presetSelect.setGeometry(QtCore.QRect(160, 838, 290, 28))
     ui.presetSelect.show()
 
     # End-gcode box (manual mode; replaces the default end sequence).
-    _label("End Gcode (manual mode only)", 20, 726, 280, 18)
+    _label("End Gcode (manual mode only)", 15, 872, 300, 18)
     ui.customEndGcode = QtWidgets.QPlainTextEdit(cw)
-    ui.customEndGcode.setGeometry(QtCore.QRect(20, 746, 295, 132))
+    ui.customEndGcode.setGeometry(QtCore.QRect(15, 892, 435, 78))
     ui.customEndGcode.show()
 
     refresh_presets(ui)
