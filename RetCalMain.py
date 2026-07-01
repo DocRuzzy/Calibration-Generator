@@ -7,12 +7,212 @@
 # WARNING! All changes made in this file will be lost!
 
 import sys
+import os
+import re
+import glob
 from PyQt5 import QtCore, QtGui, QtWidgets
 from RetCalui import Ui_MainWindow
 from decimal import Decimal
 
 
 ui=None
+
+# --- Prusa XL fork additions ---------------------------------------------
+# Directory that holds per-head start-gcode presets. Lives next to the script
+# (or next to the .exe when frozen by PyInstaller) so users can drop in their
+# own Prusa XL start-gcode examples after cloning.
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PRESET_DIR = os.path.join(BASE_DIR, "presets")
+
+
+def list_presets():
+    """Return sorted preset file paths found under PRESET_DIR, recursively
+    (so start-gcode examples can be organised in sub-folders)."""
+    if not os.path.isdir(PRESET_DIR):
+        return []
+    files = glob.glob(os.path.join(PRESET_DIR, "**", "*.gcode"), recursive=True) + \
+        glob.glob(os.path.join(PRESET_DIR, "**", "*.txt"), recursive=True)
+    return sorted(files, key=lambda p: p.lower())
+
+
+def read_preset(path):
+    """Read a preset file's text, tolerating encoding issues."""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+# PrusaSlicer "Machine Start G-code" uses a macro language that only resolves at
+# slice time ({if ...}{endif}, [first_layer_bed_temperature], {initial_tool},
+# regex ternaries with =~, etc.). This tool is NOT a slicer, so such templates
+# must not be fed to the printer verbatim. Detect leftover tokens after our own
+# {tool}/{hotend_temp}/{bed_temp} substitution and warn the user.
+_UNRESOLVED = re.compile(r"\{[^}\n]*\}|\[[a-zA-Z_]\w*(?:\[[0-9]+\])?\]|=~")
+
+
+def find_unresolved(text):
+    """Return up to 5 sample lines that still contain PrusaSlicer template
+    tokens (i.e. gcode the printer cannot execute)."""
+    bad = [ln.strip() for ln in text.splitlines() if _UNRESOLVED.search(ln)]
+    return bad[:5]
+
+
+PRUSA_XL_TOOLS = 5
+
+
+def prusa_xl_start_gcode(tool, hotend, bed, nozzle, travel, dimx, dimy,
+                         num_tools=PRUSA_XL_TOOLS):
+    """Build resolved, printer-ready Prusa XL start gcode for a single active
+    tool, from the normal inputs. Mirrors the flow of PrusaSlicer's stock XL
+    "Machine Start G-code" (steppers, checks, home XY, pick tool, home Z, mesh
+    bed leveling, heat, prime) but with all macros resolved -- no {if}/[vars].
+
+    A gentle probing temperature is used for homing/MBL to avoid oozing onto the
+    bed, then the nozzle is brought to the full print temperature before the
+    prime line.
+    """
+    mbl = min(170, int(hotend))          # gentle probe/MBL temperature
+    tspeed = max(1, int(travel * 60))    # mm/min
+    # Prime line near the front-left corner, clear of the centred tower.
+    px, py = 5.0, 5.0
+    L = []
+    a = L.append
+    a("; Prusa XL start gcode (auto-generated from inputs)")
+    a(f"; active tool T{tool}  nozzle {nozzle}  hotend {int(hotend)}C  bed {int(bed)}C")
+    a("M17 ; enable steppers")
+    a('M862.3 P "XL" ; printer model check')
+    a("M862.5 P2 ; g-code level check")
+    a('M862.6 P"Input shaper" ; FW feature check')
+    a("G90 ; absolute coordinates")
+    a("M83 ; relative extrusion (for priming)")
+    a(f"M862.1 T{tool} P{nozzle} ; nozzle diameter check")
+    a("; turn off unused heaters")
+    for t in range(num_tools):
+        if t != tool:
+            a(f"M104 T{t} S0")
+    a("M217 Z2 ; toolchange z-hop")
+    a(f"M140 S{int(bed)} ; set bed temp")
+    a(f"M104 T{tool} S{mbl} ; set nozzle probing temp")
+    a("; home XY")
+    a("G28 XY")
+    a(f"G1 F{tspeed}")
+    a(f"T{tool} S1 L0 D0 ; pick the active tool")
+    a(f"M109 T{tool} S{mbl} ; wait for probing temp")
+    a("M84 E ; relax extruder for accurate probing")
+    a("G28 Z ; home Z with the active tool")
+    a("G29 ; mesh bed leveling")
+    a(f"M190 S{int(bed)} ; wait for bed temp")
+    a(f"M104 T{tool} S{int(hotend)} ; set print temp")
+    a(f"M109 T{tool} S{int(hotend)} ; wait for print temp")
+    a("; prime / purge line at front-left")
+    a("G1 Z5 F1200")
+    a(f"G1 X{px} Y{py} F{tspeed}")
+    a("G1 Z0.2 F720")
+    a("G1 E9 F1000 ; prime nozzle")
+    a(f"G1 X{px + 100:.1f} E8 F1000 ; purge line")
+    a(f"G1 X{px + 120:.1f} E1 F1000 ; thin wipe")
+    a("G1 Z2 F720")
+    a("G92 E0 ; reset extruder")
+    return "\n".join(L)
+
+
+def prusa_xl_end_gcode(tool, dimx, dimy):
+    """Build resolved Prusa XL end gcode: cool down, lift, park, disable."""
+    L = []
+    a = L.append
+    a("; Prusa XL end gcode (auto-generated)")
+    a("M104 S0 ; turn off hotend")
+    a("M140 S0 ; turn off bed")
+    a("M107 ; turn off fan")
+    a("G91 ; relative")
+    a("G1 Z10 F720 ; raise Z")
+    a("G90 ; absolute")
+    a(f"G1 X0 Y{int(dimy)} F3000 ; park / present the print")
+    a("M84 ; disable steppers")
+    return "\n".join(L)
+
+
+def add_prusa_controls(ui, MainWindow):
+    """Add the Prusa XL controls (tool selector, preset dropdown, end-gcode box)
+    to the existing UI at runtime, so the generated RetCalui.py stays untouched
+    and safe to regenerate from RetCalui.ui with pyuic5."""
+
+    # Grow the fixed-size window to make room for the new bottom panel.
+    MainWindow.setMinimumSize(QtCore.QSize(810, 900))
+    MainWindow.setMaximumSize(QtCore.QSize(810, 900))
+    MainWindow.resize(810, 900)
+
+    cw = ui.centralwidget
+
+    def _label(text, x, y, w, h):
+        lbl = QtWidgets.QLabel(cw)
+        lbl.setGeometry(QtCore.QRect(x, y, w, h))
+        lbl.setText(text)
+        lbl.show()
+        return lbl
+
+    # Relabel the existing custom-gcode box: it now fully replaces the default
+    # start gcode instead of being appended to it.
+    ui.label_21.setText("Start Gcode (manual mode only)")
+
+    # Auto mode: generate Prusa XL start/end gcode from the inputs. Default ON,
+    # so the user only has to pick a tool -- no pasting required.
+    ui.autoStart = QtWidgets.QCheckBox("Auto-generate Prusa XL start/end gcode", cw)
+    ui.autoStart.setGeometry(QtCore.QRect(20, 648, 300, 20))
+    ui.autoStart.setChecked(True)
+    ui.autoStart.show()
+
+    # Active tool selector (T0..T4).
+    _label("Prusa XL Active Tool", 20, 672, 200, 18)
+    ui.toolSelect = QtWidgets.QComboBox(cw)
+    ui.toolSelect.setGeometry(QtCore.QRect(20, 692, 120, 26))
+    ui.toolSelect.addItems(["T0", "T1", "T2", "T3", "T4"])
+    ui.toolSelect.show()
+
+    # Start-gcode preset dropdown (manual mode; populated from ./presets).
+    _label("Start-gcode preset", 150, 672, 165, 18)
+    ui.presetSelect = QtWidgets.QComboBox(cw)
+    ui.presetSelect.setGeometry(QtCore.QRect(150, 692, 165, 26))
+    ui.presetSelect.show()
+
+    # End-gcode box (manual mode; replaces the default end sequence).
+    _label("End Gcode (manual mode only)", 20, 726, 280, 18)
+    ui.customEndGcode = QtWidgets.QPlainTextEdit(cw)
+    ui.customEndGcode.setGeometry(QtCore.QRect(20, 746, 295, 132))
+    ui.customEndGcode.show()
+
+    refresh_presets(ui)
+    ui.presetSelect.currentIndexChanged.connect(lambda _idx: load_preset(ui))
+
+    # Grey out the manual start/end widgets while auto mode is on.
+    def _sync_auto(checked=None):
+        manual = not ui.autoStart.isChecked()
+        ui.presetSelect.setEnabled(manual)
+        ui.customGcode.setEnabled(manual)
+        ui.customEndGcode.setEnabled(manual)
+        ui.label_21.setEnabled(manual)
+    ui.autoStart.toggled.connect(_sync_auto)
+    _sync_auto()
+
+
+def refresh_presets(ui):
+    """Populate the preset dropdown from PRESET_DIR."""
+    ui.presetSelect.blockSignals(True)
+    ui.presetSelect.clear()
+    ui.presetSelect.addItem("-- select preset --", "")
+    for path in list_presets():
+        ui.presetSelect.addItem(os.path.relpath(path, PRESET_DIR), path)
+    ui.presetSelect.blockSignals(False)
+
+
+def load_preset(ui):
+    """Load the selected preset file's text into the start-gcode box."""
+    path = ui.presetSelect.currentData()
+    if path:
+        ui.customGcode.setPlainText(read_preset(path))
+# -------------------------------------------------------------------------
 
 #Start Raft
 #def raft (file,xpos,ypos,ps,eValueresult,lh):
@@ -113,8 +313,37 @@ def gengcode ():
         tb = float(ui.tempBed.text())
 
 #Custom Gcode
-        sgcode = str(ui.customGcode.toPlainText())
+        tool = int(ui.toolSelect.currentIndex())   # 0..4 -> active Prusa XL head
 
+        # Auto mode (default): generate resolved Prusa XL start/end gcode from the
+        # inputs -- the user only picks a tool. Manual mode: use the text boxes.
+        if ui.autoStart.isChecked():
+            sgcode = prusa_xl_start_gcode(tool, tsh, tb, nd, ts, dx, dy)
+            egcode = prusa_xl_end_gcode(tool, dx, dy)
+        else:
+            sgcode = str(ui.customGcode.toPlainText())
+            egcode = str(ui.customEndGcode.toPlainText())
+
+        # Substitute placeholders inside custom start/end gcode so PrusaSlicer-style
+        # templates receive the real values selected in the UI. Uses str.replace
+        # (not .format) so stray { } in pasted gcode never raise. (No-op for
+        # auto-generated gcode, which already contains resolved values.)
+        def fill(text):
+            return (text.replace("{tool}", str(tool))
+                        .replace("{hotend_temp}", str(int(tsh)))
+                        .replace("{bed_temp}", str(int(tb))))
+
+        # Guard: a PrusaSlicer "Machine Start G-code" template (with {if}/[vars]/=~)
+        # cannot run on the printer as-is. Flag any leftover tokens after fill().
+        unresolved = find_unresolved(fill(sgcode)) + find_unresolved(fill(egcode))
+        if unresolved:
+            file.write(f";\n")
+            file.write(f";!!! WARNING: start/end gcode contains UNRESOLVED PrusaSlicer template tokens.\n")
+            file.write(f";!!! This gcode will likely FAIL on the printer. Use resolved machine gcode\n")
+            file.write(f";!!! (copy the start block from a sliced .gcode) or the {{tool}}/{{hotend_temp}}/{{bed_temp}} placeholders.\n")
+            for ln in unresolved:
+                file.write(f";!!!   {ln}\n")
+            file.write(f";\n")
 
         file.write(f";\n")
         file.write(f";\n")
@@ -157,20 +386,28 @@ def gengcode ():
 
 
 #start Gcode
-        file.write(f";Start Gcode\n")
-        file.write(f"M140 S{int(tb)}\n")
-        file.write(f"M105\n")
-        file.write(f"M190 S{int(tb)}\n")
-        file.write(f"M104 S{int(tsh)}\n")
-        file.write(f"M105\n")
-        file.write(f"M109 S{int(tsh)}\n")
-        file.write(f"M82\n")
-        file.write(f"G28\n")
-        file.write(f"G92 E0\n")
-        file.write(f"G1 F200 E1\n")
-        file.write(f"G92 E0\n")
+        # Custom start gcode fully REPLACES the old hardcoded start block. The
+        # user's Prusa XL start gcode is expected to home, run MBL, heat, prime,
+        # and pick the tool itself. If no custom start gcode is provided, fall
+        # back to a minimal single-tool start so the tool still works standalone.
+        file.write(f";Start Gcode (custom, replaces default)\n")
+        if sgcode.strip():
+            file.write(fill(sgcode) + "\n")
+        else:
+            file.write(f"M140 S{int(tb)}\n")
+            file.write(f"M190 S{int(tb)}\n")
+            file.write(f"T{tool}\n")
+            file.write(f"M104 S{int(tsh)}\n")
+            file.write(f"M109 S{int(tsh)}\n")
+            file.write(f"G28\n")
 
-        file.write(f"{sgcode}\n")
+        # Normalise machine state for the tower regardless of what the custom
+        # gcode left behind: select the chosen head, absolute XYZ, absolute
+        # extrusion (the raft below relies on M82), reset the extruder origin.
+        file.write(f"T{tool}\n")
+        file.write(f"G90\n")
+        file.write(f"M82\n")
+        file.write(f"G92 E0\n")
 
         file.write(f";\n")
         file.write(f";\n")
@@ -497,25 +734,40 @@ def gengcode ():
 
     #End Game
 
-    #Raise 5mm
-        file.write(f"G1 Z5\n")    
-    #Absolute Position
+    #Raise 5mm and switch back to absolute positioning before any end sequence
+        file.write(f"G1 Z5\n")
         file.write(f"G90\n")
-    #Home X Y
-        file.write(f"G28 X0 Y0\n")
-    #Turn off Steppers
-        file.write(f"M84\n")
-    #Turn off Fan
-        file.write(f"M107\n")
-    #Turn off Hotend
-        file.write(f"M104 S0\n")
-    #Turn off Bed
-        file.write(f"M140 S0\n")
+
+    # Custom end gcode fully REPLACES the default end sequence (e.g. Prusa XL
+    # tool park). Falls back to a minimal safe shutdown if none is provided.
+        if egcode.strip():
+            file.write(fill(egcode) + "\n")
+        else:
+            file.write(f"M104 S0\n")   # hotend off
+            file.write(f"M140 S0\n")   # bed off
+            file.write(f"M107\n")      # fan off
+            file.write(f"M84\n")       # steppers off
 
 
 
 
         file.close()
+
+        # Surface the template-token warning in the GUI too (guarded so headless
+        # / dialog-less runs never block).
+        if unresolved:
+            try:
+                QtWidgets.QMessageBox.warning(
+                    ui.centralwidget, "Unresolved start/end gcode",
+                    "The start/end gcode still contains PrusaSlicer template tokens "
+                    "(e.g. {if ...}, [first_layer_bed_temperature], {initial_tool}).\n\n"
+                    "This is a slicer template, not printer-ready gcode, and will likely "
+                    "FAIL on the printer.\n\nUse resolved machine gcode (copy the start "
+                    "block from a sliced .gcode) or the {tool}/{hotend_temp}/{bed_temp} "
+                    "placeholders.\n\nThe file was still saved, with the offending lines "
+                    "flagged near the top.")
+            except Exception:
+                pass
 
 
 
@@ -525,6 +777,7 @@ if __name__ == "__main__":
     MainWindow = QtWidgets.QMainWindow()
     ui = Ui_MainWindow()
     ui.setupUi(MainWindow)
+    add_prusa_controls(ui, MainWindow)
     ui.genGcode.clicked.connect(gengcode)
     MainWindow.show()
     sys.exit(app.exec_())
